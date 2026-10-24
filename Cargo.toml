@@ -1,0 +1,26 @@
+[package]
+name = "git-custom-cli"
+version = "2.1.1"
+edition = "2021"
+description = "Fast, keyboard-driven terminal UI for dated Git commits"
+default-run = "gct"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/git-custom-cli"
+keywords = ["git", "commit", "tui", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+
+[[bin]]
+name = "gct"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"

@@ -1,5 +1,6 @@
 # git-custom-cli (`gct`)
 
+
 `gct` is a keyboard-driven terminal UI for making Git commits with a custom date and time, a branch to push to, and a multiline message. You fill in the fields from a menu, review a summary, and then `gct` stages everything, creates the commit, and optionally pushes it to `origin`. It is written in Rust on top of `crossterm`, and it runs on Windows, macOS and Linux.
 
 ## Features

@@ -262,6 +262,18 @@ pub fn body_rows() -> usize {
     layout().body_rows as usize
 }
 
+/// Body line index under terminal row `row`, or None outside the body.
+pub fn body_line(row: u16) -> Option<usize> {
+    let Layout {
+        body_top,
+        body_rows,
+        ..
+    } = layout();
+    (body_top..body_top + body_rows)
+        .contains(&row)
+        .then(|| (row - body_top) as usize)
+}
+
 /// Draws the panel: mascot header, body lines, footer hints, and an optional cursor.
 /// `cursor` is (row, column) inside the body.
 pub fn draw(body: &[String], footer: &str, cursor: Option<(u16, u16)>) -> Result<()> {

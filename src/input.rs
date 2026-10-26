@@ -1,5 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use std::{
     fs,
     process::{Command, Stdio},
@@ -15,7 +17,10 @@ use crate::{
 /// Error text for every user cancel, so `main` can tell a cancel from a failure.
 pub const CANCELLED: &str = "Cancelled";
 
-const MENU_HINT: &str = "Up/Down or W/S move  ·  Enter select  ·  Esc/Q quit  ·  Ctrl+C quit";
+const MENU_HINT: &str =
+    "Up/Down or W/S move  ·  Enter or click select  ·  Esc/Q quit  ·  Ctrl+C quit";
+const TREE_HINT: &str =
+    "Up/Down or W/S scroll  ·  PgUp/PgDn  ·  Home/End  ·  Esc/Q back  ·  Ctrl+C quit";
 const CONFIRM_HINT: &str = "Y yes  ·  N no  ·  Enter default  ·  Ctrl+C quit";
 const LINE_HINT: &str = "Enter save  ·  Esc cancel  ·  Ctrl+C quit";
 const MESSAGE_HINT: &str = "Enter new line  ·  Ctrl+S save  ·  Esc cancel  ·  Ctrl+C quit";
@@ -26,14 +31,36 @@ const HISTORY_HINT: &str =
 const PICK_HINT: &str = "Up/Down or W/S move  ·  Enter select  ·  Esc/Q cancel  ·  Ctrl+C quit";
 const ACCOUNTS_HINT: &str = "Up/Down or W/S move  ·  Enter/Space set active  ·  A add  ·  E edit  ·  D delete  ·  L sign in  ·  R refresh  ·  Esc/Q back  ·  Ctrl+C quit";
 
-/// Next key press, or None when the screen should redraw (resize, or the pointer moved the mascot).
-fn read_key() -> Result<Option<KeyEvent>> {
+enum Input {
+    Key(KeyEvent),
+    /// Left click on this body line.
+    Click(usize),
+}
+
+/// Next key press or body click, or None when the screen should redraw (resize, or the pointer moved the mascot).
+fn read_input() -> Result<Option<Input>> {
     loop {
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => return Ok(Some(key)),
+            Event::Key(key) if key.kind == KeyEventKind::Press => return Ok(Some(Input::Key(key))),
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(line) = screen::body_line(mouse.row) {
+                    return Ok(Some(Input::Click(line)));
+                }
+            }
             Event::Mouse(mouse) if screen::track_pointer(mouse.column) => return Ok(None),
             Event::Resize(..) => return Ok(None),
             _ => {}
+        }
+    }
+}
+
+/// Like `read_input`, for screens that ignore clicks.
+fn read_key() -> Result<Option<KeyEvent>> {
+    loop {
+        match read_input()? {
+            Some(Input::Key(key)) => return Ok(Some(key)),
+            Some(Input::Click(_)) => {}
+            None => return Ok(None),
         }
     }
 }
@@ -103,6 +130,7 @@ pub fn menu(
         format!("Edit msg (editor): {message}"),
         format!("Edit options  : {mode}"),
         "View history".into(),
+        "View working tree".into(),
         format!("Account: {active}"),
         "------------".into(),
         "Finalize & commit".into(),
@@ -123,7 +151,7 @@ pub fn menu(
             "MISSION CONTROL  [{ready}/4 FIELDS READY]"
         )));
         for (position, choice) in choices.iter().enumerate() {
-            body.push(if position == 8 {
+            body.push(if position == SEPARATOR {
                 screen::muted("  ------------")
             } else {
                 styled_menu_line(position == *index, choice)
@@ -135,30 +163,51 @@ pub fn menu(
         }
         screen::draw(&body, MENU_HINT, None)?;
 
-        let Some(key) = read_key()? else { continue };
+        let key = match read_input()? {
+            None => continue,
+            Some(Input::Key(key)) => key,
+            // Context lines 0-1 are branch and identity; the working-tree lines follow.
+            Some(Input::Click(line)) if (2..context.len()).contains(&line) => {
+                return Ok("tree".into())
+            }
+            Some(Input::Click(line)) => {
+                // Choices start after the context, a blank line and the title.
+                match line.checked_sub(context.len() + 2) {
+                    Some(position) if position < choices.len() && position != SEPARATOR => {
+                        *index = position;
+                        return Ok(choice_name(position).into());
+                    }
+                    _ => continue,
+                }
+            }
+        };
         if is_interrupt(&key) {
             bail!(CANCELLED);
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('w' | 'W') => *index = previous_choice(*index),
             KeyCode::Down | KeyCode::Char('s' | 'S') => *index = next_choice(*index),
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                return Ok(match *index {
-                    0 => "date",
-                    1 => "time",
-                    2 => "branch",
-                    3 => "message",
-                    4 => "editor",
-                    5 => "options",
-                    6 => "history",
-                    7 => "account",
-                    _ => "finalize",
-                }
-                .into())
-            }
+            KeyCode::Enter | KeyCode::Char(' ') => return Ok(choice_name(*index).into()),
             KeyCode::Esc | KeyCode::Char('q' | 'Q') => bail!(CANCELLED),
             _ => {}
         }
+    }
+}
+
+const SEPARATOR: usize = 9;
+
+fn choice_name(index: usize) -> &'static str {
+    match index {
+        0 => "date",
+        1 => "time",
+        2 => "branch",
+        3 => "message",
+        4 => "editor",
+        5 => "options",
+        6 => "history",
+        7 => "tree",
+        8 => "account",
+        _ => "finalize",
     }
 }
 
@@ -170,21 +219,60 @@ fn styled_menu_line(active: bool, text: &str) -> String {
     }
 }
 
-/// Menu rows 0-5 are the fields, 6 is History, 7 is Account, 8 is a separator, 9 is Finalize.
+/// Menu rows 0-5 are the fields, 6 History, 7 Working tree, 8 Account, 9 a separator, 10 Finalize.
 fn previous_choice(index: usize) -> usize {
     match index {
-        0 => 9,
-        8 | 9 => 7,
+        0 => 10,
+        9 | 10 => 8,
         _ => index - 1,
     }
 }
 
 fn next_choice(index: usize) -> usize {
     match index {
-        6 => 7,
-        7 => 9,
-        9 => 0,
+        8 => 10,
+        10 => 0,
         _ => index + 1,
+    }
+}
+
+/// Full `git status --short`, read fresh, scrollable. Load errors show as text.
+pub fn working_tree() -> Result<()> {
+    let rows = match git::status_lines() {
+        Ok(lines) => lines,
+        Err(error) => vec![screen::danger(format!("Could not read status: {error}"))],
+    };
+    let title = if rows == ["(clean working tree)"] {
+        screen::success("Working tree clean")
+    } else {
+        screen::warning(format!(
+            "Working tree: {} changes (all are staged by commit)",
+            rows.len()
+        ))
+    };
+    let mut offset = 0usize;
+    loop {
+        // The title sits above the list.
+        let visible = screen::body_rows().saturating_sub(1);
+        offset = offset.min(rows.len().saturating_sub(visible));
+        let mut body = vec![title.clone()];
+        body.extend(rows.iter().skip(offset).take(visible).cloned());
+        screen::draw(&body, TREE_HINT, None)?;
+
+        let Some(key) = read_key()? else { continue };
+        if is_interrupt(&key) {
+            bail!(CANCELLED);
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('w' | 'W') => offset = offset.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('s' | 'S') => offset = offset.saturating_add(1),
+            KeyCode::PageUp => offset = offset.saturating_sub(visible),
+            KeyCode::PageDown => offset = offset.saturating_add(visible),
+            KeyCode::Home => offset = 0,
+            KeyCode::End => offset = usize::MAX,
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => return Ok(()),
+            _ => {}
+        }
     }
 }
 

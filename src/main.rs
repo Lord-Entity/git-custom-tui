@@ -17,11 +17,61 @@ use std::io::{stdin, stdout, IsTerminal};
 #[derive(Parser, Debug)]
 #[command(name = "gct", version, about = "Fast Git commit TUI")]
 struct Args {
+    /// Open the saved-accounts screen
     #[arg(long, conflicts_with = "clear_config")]
     account: bool,
+    /// Delete the saved configuration file
     #[arg(long)]
     clear_config: bool,
+    /// Print a usage guide for AI agents and exit
+    #[arg(long)]
+    agent: bool,
+    /// Commit date YYYY-MM-DD (YYYY:MM:DD also works); default today. Any of -d/-t/-b/-m/-ml skips the TUI
+    #[arg(short = 'd', long)]
+    date: Option<String>,
+    /// Commit time HH:MM:SS; default now
+    #[arg(short = 't', long)]
+    time: Option<String>,
+    /// Branch to push to; default the current branch
+    #[arg(short = 'b', long)]
+    branch: Option<String>,
+    /// One-line commit message (required without the TUI)
+    #[arg(short = 'm', long)]
+    message: Option<String>,
+    /// Description as bullets: -ml "- first item - second item"
+    #[arg(long = "ml", allow_hyphen_values = true)]
+    ml: Option<String>,
+    /// Also push to origin/<branch> after committing (default: local commit only)
+    #[arg(long)]
+    push: bool,
 }
+
+const AGENT_GUIDE: &str = r#"gct - commit with a custom date/time. Run inside a git repo.
+It runs `git add .` (stages everything) and commits. With --push it also pushes to origin/<branch>.
+
+Command format:
+  gct -d YYYY-MM-DD -t HH:MM:SS -b <branch> -m "<type>: <one-line summary>" -ml "- <item> - <item>" [--push]
+
+Flags:
+  -d   commit date YYYY-MM-DD (default: today)
+  -t   commit time HH:MM:SS, 24h (default: now)
+  -b   branch to push to (default: current branch)
+  -m   one-line commit message (required)
+  -ml  optional description; each item becomes a bullet
+  --push  push after committing (without it the commit stays local)
+
+Example:
+  gct -d 2026-05-05 -t 15:45:15 -b main -m "feat: add auth" -ml "- integrate login - integrate register"
+Produces the commit message:
+  feat: add auth
+
+  - integrate login
+  - integrate register
+
+Rules: quote -m and -ml values. In -ml, separate items with " - " (space, dash, space).
+Text inside an item may then contain flags like -d or --agent and words like log-in.
+Short form "-one -two" also works, but splits at every " -", so avoid it when items mention flags.
+Without any of these flags, gct opens its TUI."#;
 
 /// What the menu does after a finalize attempt.
 enum Step {
@@ -32,10 +82,26 @@ enum Step {
 }
 
 fn run() -> Result<Vec<String>> {
-    let args = Args::parse();
+    // clap short flags are one letter, so `-ml` would parse as `-m l`; rewrite it to `--ml`.
+    let args =
+        Args::parse_from(
+            std::env::args().map(|arg| if arg == "-ml" { "--ml".into() } else { arg }),
+        );
+    if args.agent {
+        return Ok(vec![AGENT_GUIDE.into()]);
+    }
     if args.clear_config {
         config::clear()?;
         return Ok(vec!["Saved configuration cleared.".into()]);
+    }
+    if args.date.is_some()
+        || args.time.is_some()
+        || args.branch.is_some()
+        || args.message.is_some()
+        || args.ml.is_some()
+        || args.push
+    {
+        return direct_commit(args);
     }
     if !stdin().is_terminal() || !stdout().is_terminal() {
         bail!("gct needs an interactive terminal; run it directly in a shell");
@@ -57,7 +123,7 @@ fn run() -> Result<Vec<String>> {
     let status = git::status_lines().map_err(|_| anyhow!("Not a git repository"))?;
     let mut config = config::load()?;
     let mut values = initial_values(config.clone(), &branch);
-    let context = status_context(&branch, &status);
+    let mut context = status_context(&branch, &status);
     let _terminal = screen::Guard::enter()?;
 
     let mut index = 0;
@@ -109,16 +175,17 @@ fn run() -> Result<Vec<String>> {
             },
             "options" => input::options(&mut values)?,
             "history" => input::history()?,
-            "finalize" => {
-                let account = config
-                    .active_account
-                    .as_deref()
-                    .and_then(|label| config.accounts.iter().find(|a| a.label == label));
-                match finalize(&values, &config, account)? {
-                    Step::Stay(message) => notice = message,
-                    Step::Finish(summary) => return Ok(summary),
+            "tree" => {
+                input::working_tree()?;
+                // Files may have changed since startup, so refresh the header too.
+                if let Ok(status) = git::status_lines() {
+                    context = status_context(&branch, &status);
                 }
             }
+            "finalize" => match finalize(&values, &config, active_account(&config))? {
+                Step::Stay(message) => notice = message,
+                Step::Finish(summary) => return Ok(summary),
+            },
             _ => unreachable!(),
         }
     }
@@ -144,7 +211,11 @@ fn status_context(branch: &str, status: &[String]) -> Vec<String> {
             screen::success("clean")
         ));
     } else {
-        lines.push(screen::warning("Working tree changes"));
+        lines.push(format!(
+            "{} {}",
+            screen::warning("Working tree changes"),
+            screen::muted("(click to view all)")
+        ));
         lines.extend(status.iter().take(3).map(|line| format!("  {line}")));
         if status.len() > 3 {
             lines.push(screen::muted(format!("  ...and {} more", status.len() - 3)));
@@ -159,18 +230,17 @@ fn working(message: impl AsRef<str>) -> Result<()> {
     screen::draw(&[screen::accent(message)], "Please wait...", None)
 }
 
-fn finalize(values: &Values, config: &Config, account: Option<&accounts::Account>) -> Result<Step> {
-    if let Some(problem) = first_problem(values) {
-        return Ok(Step::Stay(Some(problem.into())));
-    }
-    // Check the push login before committing, so a wrong token never leaves a commit behind.
-    if let Some(account) = account {
-        if let Err(error) = accounts::verify_login(&account.github_username) {
-            return Ok(Step::Stay(Some(format!("Not committed: {error}"))));
-        }
-    }
+fn active_account(config: &Config) -> Option<&accounts::Account> {
+    config
+        .active_account
+        .as_deref()
+        .and_then(|label| config.accounts.iter().find(|a| a.label == label))
+}
 
-    // With no active account, both stay None and git uses its own config as before.
+/// With no active account, both stay None and git uses its own config as before.
+fn identity_and_login(
+    account: Option<&accounts::Account>,
+) -> (Option<git::Identity>, Option<&str>) {
     let identity = account.map(|a| git::Identity {
         name: if a.name.trim().is_empty() {
             a.github_username.clone()
@@ -182,6 +252,78 @@ fn finalize(values: &Values, config: &Config, account: Option<&accounts::Account
     let login = account
         .map(|a| a.github_username.as_str())
         .filter(|login| !login.is_empty());
+    (identity, login)
+}
+
+/// Commits from flags without the TUI, so scripts and agents can run gct.
+fn direct_commit(args: Args) -> Result<Vec<String>> {
+    let branch = git::current_branch().map_err(|_| anyhow!("Not a git repository"))?;
+    // A detached commit would not be on the branch that gets pushed, same rule as the TUI.
+    if branch == "HEAD" {
+        bail!("HEAD is detached; check out a branch before committing");
+    }
+    let now = chrono::Local::now();
+    let values = Values {
+        date: args.date.map_or_else(
+            || now.format("%Y-%m-%d").to_string(),
+            |d| d.replace(':', "-"),
+        ),
+        time: args
+            .time
+            .unwrap_or_else(|| now.format("%H:%M:%S").to_string()),
+        branch: args.branch.unwrap_or(branch),
+        message: match (args.message, args.ml) {
+            (Some(m), Some(list)) => model::with_bullets(&m, &list),
+            (Some(m), None) => m.trim().into(),
+            (None, _) => bail!("-m <message> is required (run `gct --agent` for the format)"),
+        },
+        amend: false,
+        dry_run: false,
+    };
+    if let Some(problem) = first_problem(&values) {
+        bail!("{problem}");
+    }
+    let config = config::load()?;
+    let account = active_account(&config);
+    // Check the push login before committing, so a wrong token never leaves a commit behind.
+    if let (Some(account), true) = (account, args.push) {
+        accounts::verify_login(&account.github_username).context("Not committed")?;
+    }
+    let (identity, login) = identity_and_login(account);
+    let date = format!("{} {}", values.date, values.time);
+
+    git::run(&["add", "."]).context("Staging all files failed")?;
+    git::commit(&values.message, &date, false, identity.as_ref())?;
+    config::save(&Config {
+        last_date: date.clone(),
+        last_branch: values.branch.clone(),
+        last_message: values.message.clone(),
+        ..config.clone()
+    })?;
+    if !args.push {
+        return Ok(vec![format!(
+            "Done. commit ({date}) -> local only (add --push to push)"
+        )]);
+    }
+    git::push(&values.branch, false, login).context("Committed locally, but push failed")?;
+    Ok(vec![format!(
+        "Done. commit ({date}) -> push origin/{}",
+        values.branch
+    )])
+}
+
+fn finalize(values: &Values, config: &Config, account: Option<&accounts::Account>) -> Result<Step> {
+    if let Some(problem) = first_problem(values) {
+        return Ok(Step::Stay(Some(problem.into())));
+    }
+    // Check the push login before committing, so a wrong token never leaves a commit behind.
+    if let Some(account) = account {
+        if let Err(error) = accounts::verify_login(&account.github_username) {
+            return Ok(Step::Stay(Some(format!("Not committed: {error}"))));
+        }
+    }
+
+    let (identity, login) = identity_and_login(account);
 
     let date = format!("{} {}", values.date, values.time);
     let mut summary = vec![

@@ -20,11 +20,11 @@
 
 - Rust and Cargo, to install or build from source. The crate uses edition 2021.
 - Git available on `PATH`.
-- An interactive terminal. `gct` refuses to run when stdin or stdout is not a terminal.
+- An interactive terminal for the TUI. `gct` refuses to open the TUI when stdin or stdout is not a terminal. The [flag mode](#commit-without-the-tui) works without one.
 - Run it from inside a Git repository.
 
 > [!IMPORTANT]
-> `gct` must be started directly in a shell. Piping its output or running it from a script without a terminal makes it exit with `gct needs an interactive terminal; run it directly in a shell`.
+> `gct` must be started directly in a shell. Piping its output or running it from a script without a terminal makes it exit with `gct needs an interactive terminal; run it directly in a shell`. From scripts and agents, use the flags instead (see [Commit without the TUI](#commit-without-the-tui)).
 
 ## Installation
 
@@ -55,6 +55,36 @@ The optimized binary is written to `target/release/gct` (`target\release\gct.exe
 5. Confirm the summary, then answer the push question.
 
 To save several Git accounts and switch between them, run `gct --account`. See [Accounts](#accounts).
+
+### Commit without the TUI
+
+Pass any of these flags and `gct` stages everything and commits straight away, with no menu. Add `--push` to also push:
+
+```sh
+gct -d 2026-05-05 -t 15:45:15 -b main -m "feat: add auth" -ml "- integrate login - integrate register" --push
+```
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `-d` | Date `YYYY-MM-DD` (`YYYY:MM:DD` also works) | today |
+| `-t` | Time `HH:MM:SS` | now |
+| `-b` | Branch to push to | current branch |
+| `-m` | One-line message (required) | |
+| `-ml` | Description: items separated by ` - `, each becomes a bullet | none |
+| `--push` | Push to `origin/<branch>` after committing | local commit only |
+
+The example above produces this message:
+
+```
+feat: add auth
+
+- integrate login
+- integrate register
+```
+
+Separate `-ml` items with ` - ` (space, dash, space) or put one item per line. Text inside an item can then mention flags such as `-d` or `--agent`. The short form `-ml "-one -two"` also works, but it starts a new item at every dash after a space (never at `--`).
+
+Run `gct --agent` to print this format for an AI agent, so it can write `gct` commands for you.
 
 ## Setup
 
@@ -156,7 +186,7 @@ Email comes from your public GitHub email when there is one. Otherwise `gct` use
 
 ### Main menu
 
-The screen shows a header with the mascot, the branch and the working-tree status (first three `git status --short` lines, plus a count of the rest). This status is read once when `gct` starts and does not refresh.
+The screen shows a header with the mascot, the branch and the working-tree status (first three `git status --short` lines, plus a count of the rest). This status is read when `gct` starts and refreshes after you open **View working tree**. Click the working-tree lines to open the full list.
 
 The menu shows `MISSION CONTROL [n/4 FIELDS READY]` and these rows:
 
@@ -170,12 +200,13 @@ The menu shows `MISSION CONTROL [n/4 FIELDS READY]` and these rows:
 | Edit options | Toggles amend and dry run (shows `normal`, `amend`, `dry-run` or `amend, dry-run`) |
 | Account | Opens the account picker. The row shows the active account (see [Accounts](#accounts)) |
 | View history | Opens the git history screen (see below) |
+| View working tree | Shows every `git status --short` line, read fresh. These are the files the commit stages. Scroll with Up/Down, PgUp/PgDn, Home/End; Esc/`q` goes back |
 | Finalize & commit | Validates the fields, shows the summary, and runs the commit |
 
 | Key | Action |
 | --- | --- |
 | Up / Down, `w` / `s` (any case) | Move the selection (the separator row is skipped) |
-| Enter / Space | Open the selected row |
+| Enter / Space, or a mouse click | Open the selected row |
 | Esc / `q` (any case) | Quit |
 | Ctrl+C | Quit |
 

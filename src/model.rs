@@ -128,3 +128,75 @@ pub fn truncate(value: &str, max: usize) -> String {
         value.into()
     }
 }
+
+/// Appends `-ml` items as a bullet body. Items are marked, in order of preference, by
+/// newlines, by spaced dashes (`- one - two`), or by a dash after a space (`-one -two`).
+/// The spaced and per-line forms let an item mention flags like `-d`; `--` never splits.
+pub fn with_bullets(message: &str, list: &str) -> String {
+    let list = list.trim();
+    let items: Vec<&str> = if list.contains('\n') {
+        list.lines().collect()
+    } else if list.starts_with("- ") || list.contains(" - ") {
+        list.split(" - ").collect()
+    } else {
+        split_compact(list)
+    };
+    let bullets: Vec<String> = items
+        .iter()
+        .map(|item| item.trim())
+        .map(|item| item.strip_prefix('-').unwrap_or(item).trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| format!("- {item}"))
+        .collect();
+    if bullets.is_empty() {
+        message.trim().into()
+    } else {
+        format!("{}\n\n{}", message.trim(), bullets.join("\n"))
+    }
+}
+
+/// Splits `-one -two` before each dash that starts the text or follows whitespace, unless it
+/// begins `--`. Byte indexing is safe: `-` and ASCII whitespace never occur inside UTF-8 sequences.
+fn split_compact(list: &str) -> Vec<&str> {
+    let bytes = list.as_bytes();
+    let mut starts: Vec<usize> = (0..bytes.len())
+        .filter(|&i| {
+            bytes[i] == b'-'
+                && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+                && bytes.get(i + 1) != Some(&b'-')
+        })
+        .collect();
+    if starts.first() != Some(&0) {
+        starts.insert(0, 0);
+    }
+    starts.push(bytes.len());
+    starts.windows(2).map(|w| &list[w[0]..w[1]]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_bullets;
+
+    #[test]
+    fn bullets() {
+        let b = |list| with_bullets("feat: x", list);
+        assert_eq!(
+            b("-integrate login -integrate log-in"),
+            "feat: x\n\n- integrate login\n- integrate log-in"
+        );
+        assert_eq!(b("  "), "feat: x");
+        // Spaced dashes: items may mention flags.
+        assert_eq!(
+            b("- commit with -d -t without the TUI - gct --agent prints it"),
+            "feat: x\n\n- commit with -d -t without the TUI\n- gct --agent prints it"
+        );
+        // One item per line.
+        assert_eq!(b("-a uses -d\n\t- b"), "feat: x\n\n- a uses -d\n- b");
+        // Compact form never splits on `--`, and keeps unicode intact.
+        assert_eq!(
+            b("-run gct --agent -ünï"),
+            "feat: x\n\n- run gct --agent\n- ünï"
+        );
+        assert_eq!(b("no dash -two"), "feat: x\n\n- no dash\n- two");
+    }
+}

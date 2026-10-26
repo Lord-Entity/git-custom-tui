@@ -144,7 +144,13 @@ pub fn with_bullets(message: &str, list: &str) -> String {
     let bullets: Vec<String> = items
         .iter()
         .map(|item| item.trim())
-        .map(|item| item.strip_prefix('-').unwrap_or(item).trim())
+        // Drop the item's own dash marker, but keep a leading flag like `--push` whole.
+        .map(|item| {
+            item.strip_prefix('-')
+                .filter(|rest| !rest.starts_with('-'))
+                .unwrap_or(item)
+                .trim()
+        })
         .filter(|item| !item.is_empty())
         .map(|item| format!("- {item}"))
         .collect();
@@ -198,5 +204,8 @@ mod tests {
             "feat: x\n\n- run gct --agent\n- ünï"
         );
         assert_eq!(b("no dash -two"), "feat: x\n\n- no dash\n- two");
+        // An item may start with a flag.
+        assert_eq!(b("- a - --push pushes"), "feat: x\n\n- a\n- --push pushes");
+        assert_eq!(b("--push first\n- b"), "feat: x\n\n- --push first\n- b");
     }
 }
